@@ -2,7 +2,7 @@ huggingface_hub
 streamlit
 python-dotenv
 pydantic
-smolagents
+smolagents[mcp]
 truststore
 requests
 certifi
