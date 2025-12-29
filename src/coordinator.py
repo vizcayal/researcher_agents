@@ -1,25 +1,28 @@
 import os
 import json
 import logging
+import time
 from typing import List, Dict
 import truststore
 truststore.inject_into_ssl()
+import winsound
 
 # Set environment variables to help with corporate proxies
 os.environ['SSL_CERT_FILE'] = ""  # Force use of system store
 os.environ['REQUESTS_CA_BUNDLE'] = ""
 os.environ['CURL_CA_BUNDLE'] = ""
 
-from smolagents import InferenceClientModel, MCPClient, tool, CodeAgent
+from smolagents import InferenceClientModel, tool, ToolCallingAgent
 from .prompts import COORDINATOR_DIRECTION, SUBAGENT_DIRECTION
+from tavily import TavilyClient
 
 logger = logging.getLogger(__name__)
 
 class Coordinator:
     def __init__(
         self, 
-        model_name: str = "meta-llama/Llama-3.3-70B-Instruct",
-        subagent_model_id: str = "meta-llama/Llama-3.3-70B-Instruct",
+        model_name: str = "Qwen/Qwen2.5-Coder-32B-Instruct",
+        subagent_model_id: str = "Qwen/Qwen2.5-Coder-32B-Instruct",
         hf_key: str = None
     ):
         self.hf_key = hf_key or os.getenv("HF_KEY") or os.getenv("HF_TOKEN")
@@ -32,84 +35,113 @@ class Coordinator:
             api_key=self.hf_key,
         )
         
-        firecrawl_key = os.getenv("FIRECRAWL_KEY")
-        if not firecrawl_key:
-            raise ValueError("FIRECRAWL_KEY environment variable is missing.")
+        self.tavily_key = os.getenv("TAVILY_API_KEY")
+        if not self.tavily_key:
+            raise ValueError("TAVILY_API_KEY environment variable is missing.")
         
-        self.mcp_url = f"https://mcp.firecrawl.dev/{firecrawl_key}/v2/mcp"
+        self.tavily_client = TavilyClient(api_key=self.tavily_key)
 
     def coordinate(self, user_query: str, research_plan: str, subtasks: List[Dict]) -> str:
         logger.info("Initializing Coordinator and sub-agents...")
-        
-        with MCPClient({"url": self.mcp_url, "transport": "streamable-http"}) as mcp_tools:
+
+        @tool
+        def web_search(query: str) -> str:
+            """
+            Search the web for real-time information using Tavily.
             
-            @tool
-            def research_subtask(subtask_id: str, title: str, description: str) -> str:
-                """
-                A tool that performs deep research on a specific subtask. 
-                It spawns a specialized agent to handle just this part of the plan.
+            Args:
+                query: The search query to look up.
+            """
+            try:
+                response = self.tavily_client.search(query=query, search_depth="advanced", max_results=5)
+                results = response.get("results", [])
+                formatted_results = []
+                logger.info(f"Tavily search results: {results}")
+                for res in results:
+                    formatted_results.append(f"Title: {res.get('title')}\nURL: {res.get('url')}\nContent: {res.get('content')}\n")
+                return "\n---\n".join(formatted_results) if formatted_results else "No relevant results found."
+            except Exception as e:
+                logger.error(f"Tavily search error: {e}")
+                return f"Search failed: {e}"
 
-                Args:
-                    subtask_id (str): The unique ID of the subtask.
-                    title (str): The title of the subtask.
-                    description (str): Detailed research instructions for this subtask.
-                """
-                logger.info(f"Starting sub-agent for task: {subtask_id}")
+        findings = []
+        
+        for task in subtasks:
+            subtask_id = task.get('id')
+            title = task.get('title')
+            description = task.get('description')
+            
+            logger.info(f"Starting sub-agent for task: {subtask_id}")
 
-                subagent = CodeAgent(
-                    tools=mcp_tools,
-                    model=self.subagent_model,
-                    add_base_tools=True,
-                    name=f"subagent_{subtask_id}",
-                    max_steps=5
-                )
+            subagent = ToolCallingAgent(
+                tools=[web_search],
+                model=self.subagent_model,
+                add_base_tools=False,
+                name=f"subagent_{subtask_id}",
+                max_steps=1,
+            )
+            
+            subagent_prompt = SUBAGENT_DIRECTION.format(
+                user_query=user_query,
+                research_plan=research_plan,
+                subtask_id=subtask_id,
+                subtask_title=title,
+                subtask_description=description,
+            )
+
+            try:
+                finding = subagent.run(subagent_prompt)
+                findings.append(f"FINDINGS FOR TASK {subtask_id}: {title}\n\n{finding}")
                 
-                subagent_prompt = SUBAGENT_DIRECTION.format(
-                    user_query=user_query,
-                    research_plan=research_plan,
-                    subtask_id=subtask_id,
-                    subtask_title=title,
-                    subtask_description=description,
-                )
+                # Save individual sub-agent finding
+                os.makedirs("research_outputs", exist_ok=True)
+                with open(f"research_outputs/subtask_{subtask_id}.txt", "w", encoding="utf-8") as f:
+                    f.write(finding)
+                logger.info(f"Sub-agent for {subtask_id} complete. Finding saved to research_outputs/subtask_{subtask_id}.txt")
+                winsound.Beep(1000, 500)
+                
+            except Exception as e:
+                logger.error(f"Error in sub-agent {subtask_id}: {e}")
+                findings.append(f"FINDINGS FOR TASK {subtask_id}: {title}\n\nERROR: Failed to complete task. {e}")
 
-                return subagent.run(subagent_prompt)
-
-            coordinator_agent = CodeAgent(
-                tools=[research_subtask],
-                model=self.coordinator_model,
-                add_base_tools=True,
-                name="coordinator_agent"
-            )
-
-            # Define the task for the coordinator
-            coordinator_task = (
-                f"Your mission is to complete the research report for: '{user_query}'.\n"
-                "The 'subtasks' variable contains a list of research components to be investigated.\n"
-                "STEP-BY-STEP PROCESS:\n"
-                "1. Loop through every item in the `subtasks` list.\n"
-                "2. For each item, call the `research_subtask` function using its 'id', 'title', and 'description'.\n"
-                "3. Append the result of each call into a list of findings.\n"
-                "4. Once all subtasks are finished, combine all captured findings into a single, polished Markdown report.\n"
-                "5. Ensure the report follows the GUIDELINES (Headings, Bibliography, Cohesion).\n\n"
-                "DO NOT define any new classes or complex structures. Just use a simple loop and the provided `research_subtask` function."
-            )
-
-            # Run with variables passed directly to the interpreter scope
-            final_report = coordinator_agent.run(
-                coordinator_task,
-                additional_args={
-                    "user_query": user_query,
-                    "research_plan": research_plan,
-                    "subtasks": subtasks
-                }
-            )
+        # Final Synthesis using the model directly
+        logger.info("Synthesizing final report...")
+        
+        system_prompt = COORDINATOR_DIRECTION.format(
+            user_query=user_query,
+            research_plan=research_plan,
+            subtasks_json=json.dumps(subtasks, indent=2)
+        )
+        
+        synthesis_input = "\n\n".join(findings)
+        user_prompt = f"Here are the findings from the specialized sub-agents. Please synthesize them into a cohesive final research report as per the original project guidelines.\n\nSUB-AGENT FINDINGS:\n{synthesis_input}"
+        
+        try:
+            response = self.coordinator_model(messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ])
+            
+            final_report = response.content
+            
+            # Clean up potential <think> tags if from a reasoning model
+            if "<think>" in final_report and "</think>" in final_report:
+                final_report = final_report.split("</think>")[-1].strip()
+            elif "<think>" in final_report:
+                final_report = final_report.split("<think>")[-1].strip()
+                if "\n\n" in final_report:
+                    final_report = final_report.split("\n\n", 1)[-1]
+            
+            # Save final report
+            with open("research_outputs/final_report.md", "w", encoding="utf-8") as f:
+                f.write(final_report)
+            logger.info("Final report saved to research_outputs/final_report.md")
+                    
             return final_report
+        except Exception as e:
+            logger.error(f"Error during final synthesis: {e}")
+            return f"# Research Output\n\nFailed to synthesize final report. Error: {e}\n\n## Raw Findings\n\n{synthesis_input}"
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
-    
-    # Example usage (would require valid keys and plan)
-    # coord = Coordinator()
-    # report = coord.coordinate(user_query="...", research_plan="...", subtasks=[...])
-    # print(report)
