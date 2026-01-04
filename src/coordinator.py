@@ -5,14 +5,14 @@ import time
 from typing import List, Dict
 import truststore
 truststore.inject_into_ssl()
-import winsound
+
 
 # Set environment variables to help with corporate proxies
 os.environ['SSL_CERT_FILE'] = ""  # Force use of system store
 os.environ['REQUESTS_CA_BUNDLE'] = ""
 os.environ['CURL_CA_BUNDLE'] = ""
 
-from smolagents import InferenceClientModel, tool, ToolCallingAgent
+from smolagents import InferenceClientModel, tool, CodeAgent
 from .prompts import COORDINATOR_DIRECTION, SUBAGENT_DIRECTION
 from tavily import TavilyClient
 
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 class Coordinator:
     def __init__(
         self, 
-        model_name: str = "Qwen/Qwen2.5-Coder-32B-Instruct",
-        subagent_model_id: str = "Qwen/Qwen2.5-Coder-32B-Instruct",
+        model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+        subagent_model_id: str = "Qwen/Qwen2.5-7B-Instruct",
         hf_key: str = None
     ):
         self.hf_key = hf_key or os.getenv("HF_KEY") or os.getenv("HF_TOKEN")
@@ -48,9 +48,6 @@ class Coordinator:
         def web_search(query: str) -> str:
             """
             Search the web for real-time information using Tavily.
-            
-            Args:
-                query: The search query to look up.
             """
             try:
                 response = self.tavily_client.search(query=query, search_depth="advanced", max_results=5)
@@ -78,7 +75,7 @@ class Coordinator:
                 model=self.subagent_model,
                 add_base_tools=False,
                 name=f"subagent_{subtask_id}",
-                max_steps=1,
+                max_steps=2,
             )
             
             subagent_prompt = SUBAGENT_DIRECTION.format(
@@ -98,7 +95,7 @@ class Coordinator:
                 with open(f"research_outputs/subtask_{subtask_id}.txt", "w", encoding="utf-8") as f:
                     f.write(finding)
                 logger.info(f"Sub-agent for {subtask_id} complete. Finding saved to research_outputs/subtask_{subtask_id}.txt")
-                winsound.Beep(1000, 500)
+
                 
             except Exception as e:
                 logger.error(f"Error in sub-agent {subtask_id}: {e}")

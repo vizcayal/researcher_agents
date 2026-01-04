@@ -2,153 +2,361 @@ import truststore
 truststore.inject_into_ssl()
 import streamlit as st
 import os
+import json
+import logging
+import time
+from typing import List, Dict
 from dotenv import load_dotenv
+
+# Import our agents from the src directory
 from src.clarifier import Clarifier
 from src.planner import Planner
+from src.splitter import Splitter
+from src.coordinator import Coordinator
+from src.reviewer import Reviewer
 
-# Load environment variables
+# Configuration and Secrets
 load_dotenv()
-HF_KEY = os.getenv("HF_KEY")
 
-# Page Config
-st.set_page_config(page_title="Deep Research Agent", page_icon="🔍", layout="centered")
+# Strategy to support both Hugging Face Spaces (st.secrets) and Local (.env/os.getenv)
+def get_secret(key):
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return os.getenv(key)
 
-# Custom CSS for better aesthetics
-# Custom CSS for Premium Aesthetics
+HF_KEY = get_secret("HF_KEY")
+TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- UI STYLING ---
+st.set_page_config(page_title="Deep Research Agent", page_icon="🧬", layout="wide")
+
 st.markdown("""
     <style>
-    /* Global Styles */
-    .stApp {
-        background: linear-gradient(135deg, #1e1e2f 0%, #2a2a40 100%);
-        color: #e0e0e0;
-        font-family: 'Inter', sans-serif;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"], .stApp {
+        font-family: 'Inter', sans-serif !important;
     }
-    
-    /* Input Fields */
-    .stTextInput > div > div > input {
-        background-color: #3b3b55;
-        color: #ffffff;
-        border: 1px solid #555;
-        border-radius: 8px;
-        padding: 10px;
+
+    .main {
+        background-color: #0e1117;
     }
-    
-    /* Buttons */
-    .stButton > button {
+    .stButton>button {
         width: 100%;
-        border-radius: 8px;
+        border-radius: 6px;
         height: 3em;
-        background: linear-gradient(90deg, #FF4B4B 0%, #FF6B6B 100%);
+        background: linear-gradient(90deg, #4f46e5 0%, #3b82f6 100%);
         color: white;
         font-weight: 600;
+        font-family: 'Inter', sans-serif;
         border: none;
-        transition: transform 0.2s, box-shadow 0.2s;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
     }
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 15px rgba(255, 75, 75, 0.4);
+    .stButton>button:hover {
+        background: linear-gradient(90deg, #4338ca 0%, #2563eb 100%);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        transform: translateY(-1px);
     }
-    
-    /* Headers */
-    .main-header {
-        font-size: 3rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #ff8a00, #e52e71);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        text-align: center;
-        margin-bottom: 0.5rem;
-        padding-bottom: 1rem;
+    .report-container {
+        padding: 25px;
+        border-radius: 12px;
+        background-color: #1a1c23;
+        border: 1px solid #2d3748;
     }
-    
-    /* Success/Info Messages */
-    .stAlert {
-        background-color: rgba(60, 60, 80, 0.8);
-        border: 1px solid #555;
-        color: #eee;
-        border-radius: 10px;
-    }
-    
-    /* Sub-headers */
-    .sub-header {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #ff8a00;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #333;
-        padding-bottom: 0.5rem;
+    .status-box {
+        padding: 12px;
+        border-radius: 8px;
+        margin-bottom: 12px;
+        border-left: 5px solid #4f46e5;
+        background-color: #242731;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.markdown('<div class="main-header">Deep Research Agent 🔍</div>', unsafe_allow_html=True)
-st.markdown("Generate comprehensive research plans using AI agents.")
-
-# Sidebar for configuration
-with st.sidebar:
-    st.header("Configuration")
-    if not HF_KEY:
-        HF_KEY = st.text_input("Enter HuggingFace API Key", type="password")
-        if HF_KEY:
-             os.environ["HF_KEY"] = HF_KEY
-    
-    model_name = st.text_input("Model Name", value='deepseek-ai/DeepSeek-R1-Distill-Llama-8B')
-
-if not HF_KEY:
-    st.warning("Please provide a HuggingFace API Token in the sidebar or .env file to proceed.")
-    st.stop()
-
-# Session State
+# --- SESSION STATE INITIALIZATION ---
+if 'step' not in st.session_state:
+    st.session_state.step = 1
+if 'initial_topic' not in st.session_state:
+    st.session_state.initial_topic = ""
 if 'suggestions' not in st.session_state:
-    st.session_state.suggestions = None
+    st.session_state.suggestions = []
 if 'final_topic' not in st.session_state:
     st.session_state.final_topic = ""
+if 'research_plan' not in st.session_state:
+    st.session_state.research_plan = ""
+if 'subtasks' not in st.session_state:
+    st.session_state.subtasks = []
+if 'findings' not in st.session_state:
+    st.session_state.findings = {}
+if 'final_report' not in st.session_state:
+    st.session_state.final_report = ""
 
-# Step 1: Input Topic
-st.markdown('<div class="sub-header">1. Define Topic</div>', unsafe_allow_html=True)
-initial_topic = st.text_input("Enter your broad research topic:", placeholder="e.g., The future of renewable energy in Southeast Asia")
+# --- MODELS ---
+CLARIFIER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+PLANNER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+SPLITTER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+COORDINATOR_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+SUBAGENT_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+REVIEWER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
 
-if st.button("Clarify Topic"):
-    if initial_topic:
-        with st.spinner("Consulting with Clarifier Agent..."):
-            clarifier = Clarifier(model_name=model_name, hf_key=HF_KEY)
-            suggestions = clarifier.get_suggestions(initial_topic)
-            st.session_state.suggestions = suggestions
-    else:
-        st.error("Please enter a topic first.")
+# --- HEADERS ---
+st.title("🧬 Deep Research Agent")
+st.markdown("### The ultimate AI research pipeline that browses the web for you.")
 
-# Step 2: Refine & Select
-if st.session_state.suggestions:
-    st.markdown('<div class="sub-header">2. Refine Logic</div>', unsafe_allow_html=True)
-    st.markdown("The agent has analyzed your topic and suggested the following directions:")
+# --- SIDEBAR CONFIG ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
     
-    for i, sug in enumerate(st.session_state.suggestions, 1):
-        with st.expander(f"Option {i}: {sug.get('title')}", expanded=True):
-            st.write(sug.get('description'))
-            if st.button(f"Use Option {i}", key=f"btn_{i}"):
-                st.session_state.final_topic = f"{sug.get('title')} - {sug.get('description')}"
+    # Allow local override of keys if not in secrets
+    if not HF_KEY:
+        hf_input = st.text_input("Hugging Face Token", type="password")
+        if hf_input: HF_KEY = hf_input
+    
+    if not TAVILY_API_KEY:
+        tavily_input = st.text_input("Tavily API Key", type="password")
+        if tavily_input: TAVILY_API_KEY = tavily_input
+        
+    if not HF_KEY or not TAVILY_API_KEY:
+        st.error("Please provide both HF_KEY and TAVILY_API_KEY to start.")
+        st.stop()
+    
+    st.success("API Keys connected.")
+    
+    st.divider()
+    if st.button("🔄 Reset Global Research"):
+        for key in st.session_state.keys():
+            del st.session_state[key]
+        st.rerun()
+
+# --- STEP 1: INITIAL TOPIC ---
+if st.session_state.step == 1:
+    st.header("1️⃣ What are you researching?")
+    topic_input = st.text_input("Enter a broad topic or research question:", placeholder="e.g., The impact of AI on specialized legal services")
+    
+    if st.button("Start Clarification"):
+        if topic_input:
+            st.session_state.initial_topic = topic_input
+            with st.spinner("Analyzing topic and generating directions..."):
+                clarifier = Clarifier(model_name=CLARIFIER_MODEL, hf_key=HF_KEY)
+                st.session_state.suggestions = clarifier.get_suggestions(topic_input)
+                st.session_state.step = 2
                 st.rerun()
-    
-    st.session_state.final_topic = st.text_area("Refined Research Topic (Edit below or use suggestions):", value=initial_topic if not st.session_state.final_topic else st.session_state.final_topic, height=100)
-
-    # Step 3: Generate Plan
-    if st.button("Generate Research Plan"):
-        if st.session_state.final_topic:
-            with st.spinner("Planner Agent is creating your strategy..."):
-                planner = Planner(model_name=model_name, hf_key=HF_KEY)
-                plan = planner.plan(st.session_state.final_topic)
-                
-                st.markdown('<div class="sub-header">3. Research Plan</div>', unsafe_allow_html=True)
-                st.markdown(plan)
-                
-                # Download button
-                st.download_button(
-                    label="Download Plan",
-                    data=plan,
-                    file_name="research_plan.md",
-                    mime="text/markdown"
-                )
         else:
-            st.error("Please define a final topic.")
+            st.error("Please enter a topic.")
+
+# --- STEP 2: CLARIFICATION SUGGESTIONS ---
+elif st.session_state.step == 2:
+    st.header("2️⃣ Refine Your Topic")
+    st.write(f"Based on: **{st.session_state.initial_topic}**")
+    
+    if not st.session_state.suggestions:
+        st.warning("No suggestions generated. You can proceed with the original topic.")
+        st.session_state.final_topic = st.session_state.initial_topic
+        if st.button("Use Original Topic"):
+            st.session_state.step = 3
+            st.rerun()
+    else:
+        st.markdown("### Choose a Direction:")
+        cols = st.columns(len(st.session_state.suggestions))
+        for i, sug in enumerate(st.session_state.suggestions):
+            with cols[i]:
+                st.subheader(sug['title'])
+                st.write(sug['description'])
+                if st.button(f"Select Option {i+1}", key=f"sel_{i}"):
+                    st.session_state.final_topic = f"{sug['title']}: {sug['description']}"
+                    st.session_state.step = 3
+                    st.rerun()
+        
+        st.divider()
+        custom_topic = st.text_area("Or type your own refined topic:", value=st.session_state.initial_topic)
+        if st.button("Use Custom Topic"):
+            st.session_state.final_topic = custom_topic
+            st.session_state.step = 3
+            st.rerun()
+
+# --- STEP 3: PLAN & SPLIT ---
+elif st.session_state.step == 3:
+    st.header("3️⃣ Strategy & Task Splitting")
+    st.info(f"Targeting: **{st.session_state.final_topic}**")
+    
+    if not st.session_state.research_plan:
+        if st.button("Generate Strategy"):
+            with st.spinner("Building research plan..."):
+                planner = Planner(model_name=PLANNER_MODEL, hf_key=HF_KEY)
+                st.session_state.research_plan = planner.plan(st.session_state.final_topic)
+                st.rerun()
+    else:
+        with st.expander("📝 View Research Strategy", expanded=True):
+            st.markdown(st.session_state.research_plan)
+        
+        if not st.session_state.subtasks:
+            if st.button("Decompose into Subtasks"):
+                with st.spinner("Splitting plan into independent task modules..."):
+                    splitter = Splitter(model_name=SPLITTER_MODEL, hf_key=HF_KEY)
+                    st.session_state.subtasks = splitter.split(st.session_state.research_plan)
+                    st.rerun()
+        else:
+            st.markdown("### 📋 Generated Subtasks")
+            for task in st.session_state.subtasks:
+                st.markdown(f"- **{task['title']}** (ID: `{task['id']}`)")
+            
+            if st.button("🚀 Execute Research Agents"):
+                st.session_state.step = 4
+                st.rerun()
+
+# --- STEP 4: COORDINATOR & RESEARCH ---
+elif st.session_state.step == 4:
+    st.header("4️⃣ Agentic Research in Progress")
+    st.warning("Agents are browsing the web using Tavily. This may take several minutes.")
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    if not st.session_state.final_report:
+        # We need to run the coordination manually in the app context to show progress
+        coordinator = Coordinator(
+            model_name=COORDINATOR_MODEL, 
+            subagent_model_id=SUBAGENT_MODEL,
+            hf_key=HF_KEY
+        )
+        # Note: We can't easily call coordinator.coordinate exactly because it loops internally.
+        # We'll re-implement the loop here to update the UI.
+        
+        findings = []
+        # Import ToolCallingAgent and web_search logic for the UI loop
+        from smolagents import ToolCallingAgent, tool
+        from src.prompts import SUBAGENT_DIRECTION, COORDINATOR_DIRECTION
+        from tavily import TavilyClient
+        
+        tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+
+        @tool
+        def web_search(query: str) -> str:
+            """
+            Search the web for real-time information using Tavily.
+            
+            Args:
+                query: The search query to look up.
+            """
+            try:
+                response = tavily_client.search(query=query, search_depth="advanced", max_results=5)
+                results = response.get("results", [])
+                formatted = [f"Title: {r['title']}\nURL: {r['url']}\nContent: {r['content']}\n" for r in results]
+                return "\n---\n".join(formatted) if formatted else "No results."
+            except Exception as e:
+                return f"Search failed: {e}"
+
+        current_findings = []
+        for i, task in enumerate(st.session_state.subtasks):
+            t_id = task['id']
+            t_title = task['title']
+            t_desc = task['description']
+            
+            status_text.markdown(f"**Agent working on:** {t_title}...")
+            
+            with st.status(f"🔍 Researching: {t_title}", expanded=False) as status:
+                subagent = ToolCallingAgent(
+                    tools=[web_search],
+                    model=coordinator.subagent_model,
+                    add_base_tools=False,
+                    name=f"subagent_{t_id}",
+                    max_steps=2 # Optimized for speed in UI
+                )
+                prompt = SUBAGENT_DIRECTION.format(
+                    user_query=st.session_state.final_topic,
+                    research_plan=st.session_state.research_plan,
+                    subtask_id=t_id,
+                    subtask_title=t_title,
+                    subtask_description=t_desc
+                )
+                try:
+                    finding = subagent.run(prompt)
+                    current_findings.append(f"FINDINGS FOR TASK {t_id}: {t_title}\n\n{finding}")
+                    status.update(label=f"✅ {t_title} complete!", state="complete")
+                    st.markdown(finding)
+                except Exception as e:
+                    status.update(label=f"❌ {t_title} failed", state="error")
+                    st.error(f"Error: {e}")
+            
+            progress_bar.progress((i + 1) / len(st.session_state.subtasks))
+        
+        status_text.markdown("### ✨ Synthesis: Generating Final Report...")
+        with st.spinner("Synthesizing all agent findings into a cohesive document..."):
+            sys_prompt = COORDINATOR_DIRECTION.format(
+                user_query=st.session_state.final_topic,
+                research_plan=st.session_state.research_plan,
+                subtasks_json=json.dumps(st.session_state.subtasks, indent=2)
+            )
+            user_prompt = f"Synthesize these findings:\n\n" + "\n\n".join(current_findings)
+            
+            try:
+                response = coordinator.coordinator_model(messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ])
+                final_report = response.content
+                # Clean think tags
+                if "<think>" in final_report and "</think>" in final_report:
+                    final_report = final_report.split("</think>")[-1].strip()
+                elif "<think>" in final_report:
+                    final_report = final_report.split("<think>")[-1].strip()
+                    if "\n\n" in final_report: final_report = final_report.split("\n\n", 1)[-1]
+                
+                st.session_state.final_report = final_report
+                
+                # NEW: Review Step
+                status_text.markdown("### 🖋️ Review: Polishing and Finalizing...")
+                with st.spinner("Reviewer agent is refining the report and preparing PDF..."):
+                    reviewer = Reviewer(model_name=REVIEWER_MODEL, hf_key=HF_KEY)
+                    polished_report = reviewer.review(final_report)
+                    st.session_state.final_report = polished_report
+                    
+                    # Generate PDF data for session state
+                    os.makedirs("temp_outputs", exist_ok=True)
+                    pdf_path = f"temp_outputs/research_{int(time.time())}.pdf"
+                    if reviewer.generate_pdf(polished_report, pdf_path):
+                        with open(pdf_path, "rb") as f:
+                            st.session_state.pdf_data = f.read()
+                        os.remove(pdf_path) # Clean up
+                
+                st.session_state.step = 5
+                st.rerun()
+            except Exception as e:
+                st.error(f"Synthesis failed: {e}")
+
+# --- STEP 5: FINAL REPORT ---
+elif st.session_state.step == 5:
+    st.header("🏁 Final Research Report")
+    st.success("Research mission accomplished.")
+    
+    st.markdown("---")
+    st.markdown(st.session_state.final_report)
+    st.markdown("---")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "📥 Download Report (Markdown)",
+            st.session_state.final_report,
+            file_name="final_research_report.md",
+            mime="text/markdown"
+        )
+    with col2:
+        if 'pdf_data' in st.session_state:
+            st.download_button(
+                "📄 Download Report (PDF)",
+                st.session_state.pdf_data,
+                file_name="final_research_report.pdf",
+                mime="application/pdf"
+            )
+    
+    if st.button("Start New Research"):
+        for key in st.session_state.keys():
+            del st.session_state[key]
+        st.rerun()

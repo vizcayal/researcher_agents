@@ -12,6 +12,7 @@ from src.planner import Planner
 from src.clarifier import Clarifier
 from src.splitter import Splitter
 from src.coordinator import Coordinator
+from src.reviewer import Reviewer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,11 +21,12 @@ HF_KEY = os.getenv("HF_KEY")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-CLARIFIER_MODEL = 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B'
-PLANNER_MODEL = 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B'
-SPLITTER_MODEL = 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B'
-COORDINATOR_MODEL = 'MiniMaxAI/MiniMax-M1-80k'
-SUBAGENT_MODEL = 'MiniMaxAI/MiniMax-M1-80k'
+CLARIFIER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+PLANNER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+SPLITTER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+COORDINATOR_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+SUBAGENT_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
+REVIEWER_MODEL = 'Qwen/Qwen2.5-7B-Instruct'
 
 if __name__ == "__main__":
     start_time = time.perf_counter()
@@ -63,10 +65,22 @@ if __name__ == "__main__":
         subagent_model_id=SUBAGENT_MODEL,
         hf_key=HF_KEY
     )
-    report = coordinator.coordinate(user_query=final_topic, research_plan=plan, subtasks=subtasks)
+    raw_report = coordinator.coordinate(user_query=final_topic, research_plan=plan, subtasks=subtasks)
 
-    print("\n\033[93m--- Final Research Report ---\033[0m")
-    print(report)
+    # Review Phase
+    reviewer = Reviewer(model_name=REVIEWER_MODEL, hf_key=HF_KEY)
+    final_report = reviewer.review(report=raw_report)
+    
+    # Save final report and PDF
+    with open("research_outputs/final_report.md", "w", encoding="utf-8") as f:
+        f.write(final_report)
+    
+    pdf_path = "research_outputs/final_report.pdf"
+    reviewer.generate_pdf(final_report, pdf_path)
+    logger.info(f"Final polished report and PDF generated in research_outputs/")
+
+    print("\n\033[93m--- Final Polished Research Report ---\033[0m")
+    print(final_report)
     print("\033[93m-----------------------------\033[0m")
     
     elapsed_time = time.perf_counter() - start_time

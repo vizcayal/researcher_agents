@@ -1,3 +1,14 @@
+---
+title: Deep Research Agent
+emoji: 🧬
+colorFrom: red
+colorTo: orange
+sdk: streamlit
+sdk_version: 1.31.0
+app_file: app.py
+pinned: false
+---
+
 # Deep Research Agents 🔍
 
 An agentic research pipeline that helps you clarify topics, plan research, and automatically gather information from the web to generate comprehensive Markdown reports.
@@ -6,8 +17,8 @@ An agentic research pipeline that helps you clarify topics, plan research, and a
 
 - **Topic Clarification**: Iteratively refines broad research questions into specific, actionable topics.
 - **Strategic Planning**: Generates structured research plans to cover all necessary aspects of a topic.
-- **Agentic Coordination**: Uses `smolagents` and Firecrawl MCP to orchestrate search sub-agents that browse the web and synthesize findings.
-- **Robust Model Support**: Specifically optimized for "Reasoning" models (like DeepSeek-R1) and stable tool-calling models (like Qwen-2.5-Coder).
+- **Agentic Coordination**: Uses `smolagents` and **Tavily Search** to orchestrate specialized agents that browse the web and synthesize findings.
+- **Robust Model Support**: Specifically optimized for "Reasoning" models (like DeepSeek-R1) and stable tool-calling models (like Qwen-2.5-Coder and MiniMax).
 - **Corporate Network Ready**: Includes automated SSL certificate handling via `truststore` to bypass common proxy errors.
 
 ## 🛠️ Project Structure

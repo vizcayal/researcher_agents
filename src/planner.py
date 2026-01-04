@@ -1,5 +1,6 @@
 import logging
 import time
+import json
 from huggingface_hub import InferenceClient
 from .prompts import PLANNER_DIRECTION
 
@@ -59,21 +60,13 @@ class Planner:
                     logger.warning(f"Empty content received on attempt {attempt + 1}")
                     continue
 
-                # Remove DeepSeek/NVIDIA thinking block if present
-                research_plan = full_content.strip()
-                if "<think>" in research_plan and "</think>" in research_plan:
-                    logger.info("Detected thinking block in plan, extracting final content...")
-                    research_plan = research_plan.split("</think>")[-1].strip()
-                elif "<think>" in research_plan:
-                    # Handle unclosed think blocks
-                    research_plan = research_plan.split("<think>")[-1].strip()
-                    if "\n\n" in research_plan: # Guess where text might start if logic is cut
-                         research_plan = research_plan.split("\n\n", 1)[-1]
+                research_plan = self._parse_plan(full_content)
+                
+                if not research_plan:
+                    logger.warning(f"Failed to parse plan from content on attempt {attempt + 1}")
+                    continue
 
                 logger.info("Generated research plan")
-                print("\n\033[93m--- Research Plan ---\033[0m")
-                print(research_plan)
-                print("\033[93m---------------------\033[0m")
                 return research_plan
             except Exception as e:
                 logger.error(f"Error during API call (Attempt {attempt + 1}/{max_retries}): {e}")
@@ -84,3 +77,44 @@ class Planner:
                 else:
                      return ""
         return ""
+
+    def _parse_plan(self, content: str) -> str:
+        if not content:
+            return ""
+            
+        # Clean the content: remove thinking blocks and extract JSON
+        clean_content = content.strip()
+        
+        # Remove thinking blocks if present
+        if "<think>" in clean_content:
+            if "</think>" in clean_content:
+                clean_content = clean_content.split("</think>")[-1].strip()
+            else:
+                parts = clean_content.split("<think>")
+                clean_content = parts[-1].strip()
+                if "{" in clean_content:
+                    clean_content = "{" + clean_content.split("{", 1)[1]
+
+        # Extract JSON from potential code blocks
+        if "```json" in clean_content:
+            clean_content = clean_content.split("```json")[1].split("```")[0].strip()
+        elif "```" in clean_content:
+            block_content = clean_content.split("```")[1].split("```")[0].strip()
+            if block_content.startswith("{") or "research_plan" in block_content:
+                clean_content = block_content
+
+        # Final attempt to find a JSON-like structure
+        if not clean_content.startswith("{"):
+            if "{" in clean_content:
+                clean_content = "{" + clean_content.split("{", 1)[1]
+            if "}" in clean_content:
+                clean_content = clean_content.rsplit("}", 1)[0] + "}"
+
+        try:
+            data = json.loads(clean_content)
+            if isinstance(data, dict):
+                return data.get("research_plan", clean_content)
+            return clean_content
+        except json.JSONDecodeError:
+            # Fallback for models that don't return valid JSON
+            return content.split("</think>")[-1].strip() if "</think>" in content else content.strip()

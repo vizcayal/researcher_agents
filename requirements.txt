@@ -7,3 +7,4 @@ tavily-python
 truststore
 requests
 certifi
+fpdf2
